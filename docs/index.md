@@ -15,9 +15,11 @@ composer require rollun-com/rollun-datastore
 
 
 ##### Тестирование
-Чтобы запустить тесты нужно установить обязательные переменные указанные в `.env`, установить файлы конфигурации 
+Чтобы запустить тесты нужно:
+1. установить обязательные переменные указанные в `.env.dist`, установить файлы конфигурации 
 (`rollun\datastore\AssetInstaller`) для тестового окружения и подключить `ConfigProvider` в 
 конфигурационный файл.
+2. Изменить название файла конфига в дирректории autoload.
 
 ```bash
 composer lib install
@@ -161,12 +163,14 @@ $client = new Client();
 $url = 'http://example.com';
 
 $httpClient = new HttpClient($client, $url);
-$httpClient->create([
-    'id' => 1,
-    'name' => 'foo'
-]);
+$httpClient->multiCreate(
+    [
+        ['id' => 1, 'name' => 'name 1'],
+        ['id' => 2, 'name' => 'name 2']
+    ]
+);
 
-var_dump($httpClient->read(1)); // ['id' => '1', 'name' => 'foo']
+var_dump($httpClient->read(1)); // ['id' => '1', 'name' => 'name 1']
 ```
 
 ##### 4. `Memory`
@@ -415,6 +419,35 @@ $app->route(
 
 **Заголовки запроса**
 - `Datastore-Scheme` - заголовок в котором указан `json` закодирована схема `Datastore`, если он обернут в `AspectType`.
+- `X_MULTI_CREATE` - заголовок, который свидетельствует поддержки multiCreate 
+- `X_DATASTORE_IDENTIFIER` - заголовок в котором указан название ID колонки
+- `Download` - заголовок указывает на то, что мы хотим скачать файл. В значение следует указать тип файла. Например csv.
+
+Псевдокод для скачивания данный по клику на кнопку:
+```javascript
+    $('#GetFile').on('click', function () {
+        $.ajax({
+            beforeSend: function (jqXHR, settings) {
+                jqXHR.setRequestHeader('Download', 'csv');
+            },
+            url: 'http://rollun.local/api/datastore/dataStore1',
+            method: 'GET',
+            xhrFields: {
+                responseType: 'blob'
+            },
+            success: function (data) {
+                var a = document.createElement('a');
+                var url = window.URL.createObjectURL(data);
+                a.href = url;
+                a.download = 'test.csv';
+                document.body.append(a);
+                a.click();
+                a.remove();
+                window.URL.revokeObjectURL(url);
+            }
+        });
+    });
+```  
 
 ### RQL
 
@@ -983,3 +1016,119 @@ var_dump($dataStoreTo->read(3)); // ['id' => 3, 'name' => 'foo3']
     ]
 ]
 ```
+
+#### Apects, EventManager
+Библиотека поддерживает aspect pattern и observer pattern(Zend EventManager), что дает возможность выполнять дополнительные действие до события или после.
+
+Пример конфигурации для оборачивания датастора в аспект с eventManager:
+```php
+[
+        'dataStore' => [
+            'aspectDataStore1' => [ // оборачивает dataStore1 в аспект
+                'class'     => \rollun\datastore\DataStore\Aspect\AspectAbstract::class, //  здесь указываем класс в котором будут методы аспекта, например preCreate
+                'dataStore' => 'dataStore1' // указывем dataStore
+            ],
+            'aspectDataStore2' => [
+                'class'     => \rollun\datastore\DataStore\Aspect\AspectWithEventManagerAbstract::class, // оборачиваем dataStore1 в аспект с event manager
+                'dataStore' => 'dataStore1',
+                'listeners' => [ // указывем слушатели 
+                    \App\Listener\DataStoreMasterListener::class, // указывем класс которые наследник \rollun\datastore\DataStore\Aspect\AbstractAspectListener
+                    // или
+                    'onPostCreate' => ['postCreateUpdateHandler'], //  здесь нужно указать callable 
+                ]
+            ],
+            'dataStore1'       => [
+                'class'     => \rollun\datastore\DataStore\DbTable::class,
+                'tableName' => 'datastore_1',
+            ],
+        ],
+]
+```
+
+Пример слушателя:
+```php
+<?php
+declare(strict_types=1);
+
+namespace App\Listener;
+
+use rollun\datastore\DataStore\Aspect\AbstractAspectListener;
+use rollun\datastore\DataStore\DbTable;
+use rollun\dic\InsideConstruct;
+use Zend\EventManager\Event;
+
+/**
+ * Class DataStoreMasterListener
+ *
+ * @author Roman Ratsun <r.ratsun.rollun@gmail.com>
+ */
+class DataStoreMasterListener extends AbstractAspectListener
+{
+    /**
+     * @var DbTable
+     */
+    private $dataStore;
+
+    /**
+     * DataStoreMasterListener constructor.
+     *
+     * @throws \ReflectionException
+     */
+    public function __construct()
+    {
+        InsideConstruct::init(['dataStore' => 'dataStore2']);
+    }
+
+    /**
+     * @param Event $event
+     */
+    public function onPostCreate(Event $event)
+    {
+       // реализация
+    }
+
+     /**
+     * @inheritDoc
+     */
+    public function __sleep()
+    {
+        return [];
+    }
+
+    /**
+     * @inheritDoc
+     */
+    public function __wakeup()
+    {
+        InsideConstruct::initWakeup(['dataStore' => 'dataStore2']);
+    }
+}
+```
+
+#### FileObject
+Библиотека предоставляет объект (расширяет SplFileObject) для работы с файлами. Преимущества данного объекта в том, что здесь реализованы блокировки файлов, что существенно упростят работу.
+Пример использования:
+```php
+<?php
+use rollun\files\FileObject;
+
+$fileObject = new FileObject('some-file.csv');
+$fileObject->fwriteWithCheck('012345');
+$fileObject->moveSubStr(3, 1);
+$fileObject->fseek(0);
+$actual = $fileObject->fread(100); // '0345'
+``` 
+Для более подробного изучения ознакомьтесь с юнит [тестами](../test/unit/Files/FileObject).
+
+#### CsvFileObject, CsvFileObjectWithPrKey
+Библиотека предоставляет объекты для работы с csv файлами. CsvFileObjectWithPrKey работает с файлами используя разные стратегии. По умолчанию используется стратегия бинарного поиска, что в разы ускоряет поиск нужной нам строки.
+Пример использования:
+```php
+<?php
+use rollun\files\Csv\CsvFileObjectWithPrKey;
+
+$fileObject = new CsvFileObjectWithPrKey('some-file.csv');
+$result = $fileObject->getRowById('1'); // array
+
+``` 
+Для более подробного изучения ознакомьтесь с юнит [тестами](../test/unit/Files/CsvFileObject).

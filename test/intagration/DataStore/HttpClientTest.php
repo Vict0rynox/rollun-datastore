@@ -58,8 +58,11 @@ class HttpClientTest extends BaseDataStoreTest
         parent::setUp();
 
         /** @var ContainerInterface $container */
-        $this->container = include './config/container.php';
-        $adapter = $container->get('db');
+        //$this->container = include './config/container.php';
+        global $container;
+        $this->container = $container;
+
+        $adapter = $this->container->get('db');
         $this->mysqlManager = new TableManagerMysql($adapter);
 
         if ($this->mysqlManager->hasTable($this->tableName)) {
@@ -86,5 +89,17 @@ class HttpClientTest extends BaseDataStoreTest
         $client = new Client();
 
         return new HttpClient($client, $url);
+    }
+
+    public function testHeaderIdentifier()
+    {
+        $dataStoreService = 'testDataStore2';
+        $url = getenv('TEST_HOST') . "api/datastore/{$dataStoreService}";
+        $client = new Client();
+
+        $object = new HttpClient($client, $url);
+        $object->read(1);
+
+        $this->assertEquals('test', $object->getIdentifier());
     }
 }

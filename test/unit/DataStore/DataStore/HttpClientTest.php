@@ -12,6 +12,7 @@ use Psr\Http\Message\ResponseInterface;
 use rollun\datastore\DataStore\DataStoreException;
 use rollun\datastore\DataStore\HttpClient;
 use rollun\datastore\Rql\RqlQuery;
+use rollun\logger\LifeCycleToken;
 use rollun\utils\Json\Serializer;
 use Zend\Http\Client;
 use Zend\Http\Header\HeaderInterface;
@@ -20,9 +21,93 @@ use Zend\Http\Response;
 
 class HttpClientTest extends TestCase
 {
-    protected function createObject(Client $clientMock, $url = '', $options = null)
+    /**
+     * @var LifeCycleToken
+     */
+    protected $container;
+
+    protected function setUp()
     {
-        return new HttpClient($clientMock, $url, $options);
+        global $container;
+        $this->container = $container;
+    }
+
+    protected function createObject(Client $clientMock, $url = '', $options = [])
+    {
+        return new HttpClient($clientMock, $url, $options, $this->container->get(LifeCycleToken::class));
+    }
+
+    /**
+     * @param Client $clientMock
+     * @param string $url
+     * @param array  $options
+     *
+     * @return HttpClient
+     */
+    protected function createObjectForMultiCreate(Client $clientMock, $url = '', $options = [])
+    {
+        return new class($clientMock, $url, $options, $this->container->get(LifeCycleToken::class)) extends HttpClient {
+            /**
+             * @inheritDoc
+             */
+            protected function sendHead()
+            {
+                return ['X_MULTI_CREATE' => true];
+            }
+        };
+    }
+
+    public function testMultiCreateSuccess()
+    {
+        $items = [['id' => 1, 'name' => 'name']];
+        $url = '';
+        $clientMock = $this->createClientMock('POST', $url);
+        $clientMock->expects($this->once())
+            ->method('setRawBody')
+            ->with(Serializer::jsonSerialize($items));
+
+        $response = $this->createResponse($items);
+        $response->expects($this->once())
+            ->method('isSuccess')
+            ->willReturn(true);
+
+        $clientMock->expects($this->once())
+            ->method('send')
+            ->willReturn($response);
+
+        $this->assertEquals($this->createObjectForMultiCreate($clientMock, $url)->multiCreate($items), $items);
+    }
+
+    public function testMultiCreateFail()
+    {
+        $items = [['id' => 1, 'name' => 'name']];
+        $url = '';
+
+        $clientMock = $this->createClientMock('POST', $url);
+        $clientMock->expects($this->once())
+            ->method('setRawBody')
+            ->with(Serializer::jsonSerialize($items));
+
+        $response = $this->createResponse('');
+        $response->expects($this->once())
+            ->method('isSuccess')
+            ->willReturn(false);
+
+        $clientMock->expects($this->once())
+            ->method('send')
+            ->willReturn($response);
+
+        try {
+            $this->createObjectForMultiCreate($clientMock, $url)->multiCreate($items);
+        } catch (DataStoreException $e) {
+            $this->assertEquals('Can\'t create items POST    ""', $e->getMessage());
+        }
+
+        try {
+            $this->createObjectForMultiCreate($clientMock, $url)->multiCreate(['id' => 1, 'name' => 'name']);
+        } catch (DataStoreException $e) {
+            $this->assertEquals("Collection of arrays expected", $e->getMessage());
+        }
     }
 
     public function testCreateSuccess()
@@ -120,6 +205,7 @@ class HttpClientTest extends TestCase
             ->willReturn($response);
 
         $object = $this->createObject($clientMock, $url);
+        $object->setIdendifier('id');
 
         $this->assertEquals($object->update($itemsWithId), $itemsWithId);
     }
@@ -146,6 +232,7 @@ class HttpClientTest extends TestCase
             ->willReturn($response);
 
         $object = $this->createObject($clientMock, $url);
+        $object->setIdendifier('id');
 
         $this->assertEquals($object->update($itemsWithId, 1), $itemsWithId);
     }
@@ -173,6 +260,7 @@ class HttpClientTest extends TestCase
             ->willReturn($response);
 
         $object = $this->createObject($clientMock, $url);
+        $object->setIdendifier('id');
 
         $object->update($itemsWithId, 1);
     }
@@ -369,6 +457,8 @@ class HttpClientTest extends TestCase
 
         $headers['Content-Type'] = 'application/json';
         $headers['Accept'] = 'application/json';
+        $headers['X-Life-Cycle-Token'] = $this->container->get(LifeCycleToken::class)->toString();
+        $headers['LifeCycleToken'] = $this->container->get(LifeCycleToken::class)->toString();
 
         if ($ifMatch) {
             $headers['If-Match'] = '*';
@@ -449,7 +539,7 @@ class HttpClientTest extends TestCase
 
         $this->expectException(DataStoreException::class);
         $this->expectExceptionMessage(
-            "Can't create item {$method} {$url} ${status} {$reasonPhrase} New location is '{$location}'"
+            "Can't create item {$method} {$url} ${status} {$reasonPhrase} \"{$body}\" New location is '{$location}'"
         );
 
         $clientMock = $this->createClientMock($method, $url, [], 1);
@@ -492,5 +582,46 @@ class HttpClientTest extends TestCase
         $object = $this->createObject($clientMock, $url);
 
         $object->create($items, 1);
+    }
+
+    public function testHeaderIdentifier()
+    {
+        $items = ['test' => 1, 'name' => 'name',];
+        $url = '';
+        $clientMock = $this->createClientMock('GET', $url . '/1', []);
+
+        $response = $this->createResponse($items);
+        $response->expects($this->once())
+            ->method('isOk')
+            ->willReturn(true);
+
+        $header = $this->createMock(HeaderInterface::class);
+        $header->expects($this->once())
+            ->method('getFieldValue')
+            ->willReturn('test');
+
+        $headers = $this->createMock(Headers::class);
+        $headers->expects($this->once())
+            ->method('get')
+            ->with('X_DATASTORE_IDENTIFIER')
+            ->willReturn($header);
+        $headers->expects($this->once())
+            ->method('has')
+            ->with('X_DATASTORE_IDENTIFIER')
+            ->willReturn(true);
+
+        $response->expects($this->once())
+            ->method('getHeaders')
+            ->willReturn($headers);
+
+        $clientMock->expects($this->once())
+            ->method('send')
+            ->willReturn($response);
+
+        $object = $this->createObject($clientMock, $url);
+
+        $object->read($items['test']);
+
+        $this->assertEquals('test', $object->getIdentifier());
     }
 }

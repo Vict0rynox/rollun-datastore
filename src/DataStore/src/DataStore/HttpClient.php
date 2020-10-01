@@ -7,10 +7,15 @@
 namespace rollun\datastore\DataStore;
 
 use rollun\datastore\DataStore\ConditionBuilder\RqlConditionBuilder;
+use rollun\datastore\Rql\Node\BinaryNode\EqnNode;
+use rollun\dic\InsideConstruct;
+use rollun\logger\LifeCycleToken;
 use rollun\utils\Json\Serializer;
+use Xiag\Rql\Parser\Node\LimitNode;
 use Xiag\Rql\Parser\Query;
 use rollun\datastore\Rql\RqlParser;
 use Zend\Http\Client;
+use Zend\Http\Headers;
 use Zend\Http\Request;
 use Zend\Http\Response;
 
@@ -20,6 +25,8 @@ use Zend\Http\Response;
  */
 class HttpClient extends DataStoreAbstract
 {
+    protected const DATASTORE_IDENTIFIER_HEADER = 'X_DATASTORE_IDENTIFIER';
+
     /**
      * @var string 'http://example.org'
      */
@@ -55,13 +62,24 @@ class HttpClient extends DataStoreAbstract
     protected $options = [];
 
     /**
+     * @var LifeCycleToken
+     */
+    protected $lifeCycleToken;
+
+    protected $identifier;
+
+    /**
      * HttpClient constructor.
      * @param Client $client
      * @param $url
-     * @param null $options
+     * @param array $options
+     * @param LifeCycleToken|null $lifeCycleToken
+     * @throws \ReflectionException
      */
-    public function __construct(Client $client, $url, $options = null)
+    public function __construct(Client $client, $url, $options = [], LifeCycleToken $lifeCycleToken = null)
     {
+        InsideConstruct::setConstructParams(['lifeCycleToken' => LifeCycleToken::class]);
+
         $this->client = $client;
         $this->url = rtrim(trim($url), '/');
 
@@ -79,6 +97,85 @@ class HttpClient extends DataStoreAbstract
         $this->conditionBuilder = new RqlConditionBuilder();
     }
 
+    public function __wakeup()
+    {
+        InsideConstruct::initWakeup(['lifeCycleToken' => LifeCycleToken::class]);
+    }
+
+    public function __sleep()
+    {
+        return [
+            'url',
+            'login',
+            'password',
+            'client',
+            'options',
+            'conditionBuilder'
+        ];
+    }
+
+    public function setIdendifier($identifier)
+    {
+        $this->identifier = $identifier;
+    }
+
+    public function getIdentifier()
+    {
+        /*
+         * NOT USE, when head request not support, cast to GET!
+        $client = $this->initHttpClient(Request::METHOD_HEAD, $this->url);
+        $response = $client->send();
+        if ($response->isSuccess() && $response->getHeaders()->has('X_DATASTORE_IDENTIFIER')) {
+            return $response->getHeaders()->get('X_DATASTORE_IDENTIFIER')->getFieldValue();
+        }*/
+
+        if (empty($this->identifier)) {
+            $this->queryForHeaderIdentifier();
+        }
+
+        if ($this->identifier) {
+            return $this->identifier;
+        }
+
+        return parent::getIdentifier();
+    }
+
+    protected function queryForHeaderIdentifier()
+    {
+        $query = new Query();
+        $query->setLimit(new LimitNode(1));
+        $uri = $this->createUri($query);
+        $client = $this->initHttpClient(Request::METHOD_GET, $uri);
+        $response = $client->send();
+
+        $this->checkResonseHeaderIdentifier($response);
+    }
+
+    protected function checkResonseHeaderIdentifier(Response $response)
+    {
+        if (
+            $this->identifier === null
+            && ($headers = $response->getHeaders())
+            && $headers->has(self::DATASTORE_IDENTIFIER_HEADER)
+        ) {
+            $this->identifier = $headers->get(self::DATASTORE_IDENTIFIER_HEADER)->getFieldValue();
+        }
+    }
+
+    protected function sendHead()
+    {
+        $client = $this->initHttpClient(Request::METHOD_HEAD, "{$this->url}?limit(1)");
+        $response = $client->send();
+
+        if ($response->isSuccess()) {
+
+            $this->checkResonseHeaderIdentifier($response);
+
+            return $response->getHeaders()->toArray();
+        }
+        return null;
+    }
+
     /**
      * {@inheritdoc}
      */
@@ -88,6 +185,8 @@ class HttpClient extends DataStoreAbstract
         $uri = $this->createUri(null, $id);
         $client = $this->initHttpClient(Request::METHOD_GET, $uri);
         $response = $client->send();
+
+        $this->checkResonseHeaderIdentifier($response);
 
         if ($response->isOk()) {
             $result = Serializer::jsonUnserialize($response->getBody());
@@ -115,6 +214,8 @@ class HttpClient extends DataStoreAbstract
 
         $headers['Content-Type'] = 'application/json';
         $headers['Accept'] = 'application/json';
+        $headers['X-Life-Cycle-Token'] = $this->lifeCycleToken->serialize();
+        $headers['LifeCycleToken'] = $this->lifeCycleToken->serialize();
 
         if ($ifMatch) {
             $headers['If-Match'] = '*';
@@ -165,6 +266,8 @@ class HttpClient extends DataStoreAbstract
         $client = $this->initHttpClient(Request::METHOD_GET, $uri);
         $response = $client->send();
 
+        $this->checkResonseHeaderIdentifier($response);
+
         if ($response->isOk()) {
             $result = Serializer::jsonUnserialize($response->getBody());
         } else {
@@ -189,11 +292,49 @@ class HttpClient extends DataStoreAbstract
         $client->setRawBody($json);
         $response = $client->send();
 
+        $this->checkResonseHeaderIdentifier($response);
+
         if ($response->isSuccess()) {
             $result = Serializer::jsonUnserialize($response->getBody());
         } else {
             $responseMessage = $this->createResponseMessage($this->url, Request::METHOD_POST, $response);
             throw new DataStoreException("Can't create item {$responseMessage}");
+        }
+
+        return $result;
+    }
+
+    /**
+     * @inheritDoc
+     *
+     * @throws DataStoreException
+     * @throws \rollun\utils\Json\Exception
+     */
+    public function multiCreate($records)
+    {
+        if (!isset($records[0]) || !is_array($records[0])) {
+            throw new DataStoreException('Collection of arrays expected');
+        }
+
+        $head = $this->sendHead();
+        if ($head && isset($head['X_MULTI_CREATE'])) {
+            $client = $this->initHttpClient(Request::METHOD_POST, $this->url);
+            $client->setRawBody(Serializer::jsonSerialize($records));
+            $response = $client->send();
+            if ($response->isSuccess()) {
+                $result = Serializer::jsonUnserialize($response->getBody());
+            } else {
+                $responseMessage = $this->createResponseMessage($this->url, Request::METHOD_POST, $response);
+                throw new DataStoreException("Can't create items {$responseMessage}");
+            }
+        } else {
+            $client = $this->initHttpClient(Request::METHOD_POST, $this->url);
+            $result = [];
+            foreach ($records as $record) {
+                $client->setRawBody(Serializer::jsonSerialize($record));
+                $response = $client->send();
+                $result[] = Serializer::jsonUnserialize($response->getBody());
+            }
         }
 
         return $result;
@@ -223,6 +364,8 @@ class HttpClient extends DataStoreAbstract
         $client->setRawBody(Serializer::jsonSerialize($itemData));
         $response = $client->send();
 
+        $this->checkResonseHeaderIdentifier($response);
+
         if ($response->isSuccess()) {
             $result = Serializer::jsonUnserialize($response->getBody());
         } else {
@@ -243,6 +386,8 @@ class HttpClient extends DataStoreAbstract
         $client = $this->initHttpClient(Request::METHOD_DELETE, $uri);
         $response = $client->send();
 
+        $this->checkResonseHeaderIdentifier($response);
+
         if ($response->isSuccess()) {
             $result = !empty($response->getBody()) ? Serializer::jsonUnserialize($response->getBody()) : null;
         } else {
@@ -260,6 +405,7 @@ class HttpClient extends DataStoreAbstract
             $uri,
             $response->getStatusCode(),
             $response->getReasonPhrase(),
+            $response->getBody(),
         ];
 
         switch ($response->getStatusCode()) {

@@ -110,7 +110,7 @@ class DbTable extends DataStoreAbstract
     public function update($itemData, $createIfAbsent = false)
     {
         if ($createIfAbsent) {
-            trigger_error("Option 'createIfAbsent' is no more use.", E_DEPRECATED);
+            trigger_error("Option 'createIfAbsent' is no more use.", E_USER_DEPRECATED);
         }
 
         if (!isset($itemData[$this->getIdentifier()])) {
@@ -210,6 +210,15 @@ class DbTable extends DataStoreAbstract
             $this->getDbTable()->getAdapter(),
             $this->getDbTable()->getTable()
         );
+
+        // prepare record
+        foreach ($record as $k => $v) {
+            if ($v === false) {
+                $record[$k] = 0;
+            } elseif ($v === true) {
+                $record[$k] = 1;
+            }
+        }
 
         $sql = new Sql($this->getDbTable()->getAdapter());
         $update = $sql->update($this->getDbTable()->getTable());
@@ -424,7 +433,7 @@ class DbTable extends DataStoreAbstract
             $multiInsertTableGw->getAdapter()->getDriver()->getConnection()->rollback();
 
             throw new DataStoreException(
-                "Exception by multi create to table {$this->dbTable->table}.",
+                "Exception by multi create to table {$this->dbTable->table}. Details: {$throwable->getMessage()}",
                 500,
                 $throwable
             );
