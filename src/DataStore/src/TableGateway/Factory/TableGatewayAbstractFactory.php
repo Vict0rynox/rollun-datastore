@@ -9,7 +9,6 @@ namespace rollun\datastore\TableGateway\Factory;
 use Interop\Container\ContainerInterface;
 use rollun\datastore\AbstractFactoryAbstract;
 use Zend\Db\Adapter\Adapter;
-use Zend\Db\Metadata\Metadata;
 use Zend\Db\TableGateway\TableGateway;
 
 /**
@@ -57,36 +56,28 @@ class TableGatewayAbstractFactory extends AbstractFactoryAbstract
         if (!isset($config[self::KEY_TABLE_GATEWAY][$requestedName])) {
             return false;
         }
-
-        if ($this->setDbAdapter($container, $requestedName)) {
-            $dbMetadata = new Metadata($this->db);
-            $this->tableNames = array_merge($dbMetadata->getTableNames(), $dbMetadata->getViewNames());
-        }
-
-        return is_array($this->tableNames) && in_array($requestedName, $this->tableNames, true);
+        return true;
     }
 
     /**
      *
      * @param ContainerInterface $container
      * @param $requestedName
-     * @return bool
+     * @return Adapter|null
      * @throws \Psr\Container\ContainerExceptionInterface
      * @throws \Psr\Container\NotFoundExceptionInterface
      */
-    protected function setDbAdapter(ContainerInterface $container, $requestedName)
+    protected function getDbAdapter(ContainerInterface $container, $requestedName)
     {
         $config = $container->get('config')[self::KEY_TABLE_GATEWAY];
 
         if (isset($config[$requestedName]) && isset($config[$requestedName][static::KEY_ADAPTER])) {
-            $this->db = $container->has($config[$requestedName][static::KEY_ADAPTER])
+            return $container->has($config[$requestedName][static::KEY_ADAPTER])
                 ? $container->get($config[$requestedName][static::KEY_ADAPTER])
-                : false;
+                : null;
         } else {
-            $this->db = $container->has('db') ? $container->get('db') : false;
+            return $container->has('db') ? $container->get('db') : null;
         }
-
-        return (bool)$this->db;
     }
 
     /**
@@ -98,13 +89,14 @@ class TableGatewayAbstractFactory extends AbstractFactoryAbstract
     public function __invoke(ContainerInterface $container, $requestedName, array $options = null)
     {
         $config = $container->get('config')[self::KEY_TABLE_GATEWAY][$requestedName];
+        $db = $this->getDbAdapter($container, $requestedName);
 
         if (isset($config[self::KEY_SQL]) && is_a($config[self::KEY_SQL], 'Zend\Db\Sql\Sql', true)) {
-            $sql = new $config[self::KEY_SQL]($this->db, $requestedName);
+            $sql = new $config[self::KEY_SQL]($db, $requestedName);
 
-            return new TableGateway($requestedName, $this->db, null, null, $sql);
+            return new TableGateway($requestedName, $db, null, null, $sql);
         }
 
-        return new TableGateway($requestedName, $this->db);
+        return new TableGateway($requestedName, $db);
     }
 }
